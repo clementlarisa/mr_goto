@@ -10,6 +10,7 @@ from launch_ros.actions import Node
 from nav2_common.launch import RewrittenYaml
 from launch.actions import IncludeLaunchDescription
 from launch.launch_description_sources import PythonLaunchDescriptionSource
+from launch_xml.launch_description_sources import XMLLaunchDescriptionSource
 
 
 def launch_setup(context, *args, **kwargs):
@@ -88,6 +89,14 @@ def launch_setup(context, *args, **kwargs):
         localization_node,
         planner_node,
         goto_node
+        # IncludeLaunchDescription(
+        #     XMLLaunchDescriptionSource(
+        #         os.path.join(
+        #             this_directory,
+        #             "tf2ros.launch.xml",
+        #         )
+        #     )
+        # )
     ]
 
 

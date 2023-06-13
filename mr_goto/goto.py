@@ -5,13 +5,14 @@ import numpy as np
 
 import rclpy
 from rclpy.node import Node
+from rclpy.time import Time
 from rclpy.duration import Duration
 from rclpy.qos import QoSProfile, QoSDurabilityPolicy
 import tf2_ros
 import tf2_geometry_msgs
 from sensor_msgs.msg import LaserScan
 from ackermann_msgs.msg import AckermannDriveStamped, AckermannDrive
-from geometry_msgs.msg import Point, Pose, PoseStamped, Twist
+from geometry_msgs.msg import Point, Pose, PoseStamped, Twist, PointStamped
 from visualization_msgs.msg import Marker
 from visualization_msgs.msg import MarkerArray
 from nav_msgs.msg import OccupancyGrid
@@ -183,8 +184,12 @@ class pure_pursuit(Node):
 
 
         # transform goal point to vehicle coordinate frame
-        transform = self.tf_buffer.lookup_transform("base_link", self.path.header.frame_id, self.path.header.stamp)
-        goal_transformed = tf2_geometry_msgs.do_transform_point(PointWrapper(Point(goal[0], goal[1], 1)), transform).point
+        transform = self.tf_buffer.lookup_transform("base_link", self.path.header.frame_id, Time())
+        goal_point = Point()
+        goal_point.x = goal[0]
+        goal_point.y = goal[1]
+        goal_point.z = 1.
+        goal_transformed = tf2_geometry_msgs.do_transform_point(PointWrapper(goal_point), transform).point
 
         self.goal_pose = goal_transformed
     
@@ -207,12 +212,11 @@ class pure_pursuit(Node):
 
         self.publish_drive(self.speed, self.steering_angle)
         self.actual_path_pub.publish(self.actual_path)
-        self.visualize_point(goal[0], goal[1])
+        # self.visualize_point(goal[0], goal[1])
         # self.visualize_point(start_pose[0], start_pose[1])
     
     def path_callback(self, data):
         self.path = data
-        self.get_logger().info(f"Received path: {self.path}")
 
     def publish_drive(self, speed, angle):
         drive_msg = Twist()

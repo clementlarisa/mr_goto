@@ -17,11 +17,13 @@ from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy, QoSDur
 from rclpy.node import Node
 from rclpy.duration import Duration
 
+from tf2_ros import TransformBroadcaster, TransformStamped
+
 from sensor_msgs.msg import LaserScan
 from std_msgs.msg import Header
 from ackermann_msgs.msg import AckermannDriveStamped
 from nav_msgs.msg import Odometry, OccupancyGrid, Path, MapMetaData
-from geometry_msgs.msg import Pose, PoseStamped, PoseWithCovarianceStamped, Point, Quaternion
+from geometry_msgs.msg import Pose, PoseStamped, PoseWithCovarianceStamped, PoseWithCovariance, Point, Quaternion
 from visualization_msgs.msg import Marker
 
 
@@ -57,6 +59,29 @@ def timing(f):
         te = time.time()
         return result
     return wrap
+
+def quaternion_from_euler(ai, aj, ak):
+    ai /= 2.0
+    aj /= 2.0
+    ak /= 2.0
+    ci = math.cos(ai)
+    si = math.sin(ai)
+    cj = math.cos(aj)
+    sj = math.sin(aj)
+    ck = math.cos(ak)
+    sk = math.sin(ak)
+    cc = ci*ck
+    cs = ci*sk
+    sc = si*ck
+    ss = si*sk
+
+    q = np.empty((4, ))
+    q[0] = cj*sc - sj*cs
+    q[1] = cj*ss + sj*cc
+    q[2] = cj*cs - sj*sc
+    q[3] = cj*cc + sj*ss
+
+    return q
 
 
 
@@ -100,9 +125,21 @@ class PathGenerator(Node):
         # self.parameter_timer = self.create_timer(1, self.param_timer_callback)
 
         self.initial_pose = None
+        pt = Point()
+        ort = Quaternion()
+        p = Pose()
+        p.position = pt
+        p.orientation = ort
+        pwc = PoseWithCovariance()
+        pwc.pose = p
+        self.init_pose_msg = PoseWithCovarianceStamped()
+        self.init_pose_msg.pose = pwc
+    
         self.goal_pose = rclpy
         self.map = OccupancyGrid()
         self.map_matrix = np.matrix([[]])
+
+        self.tf_broadcaster = TransformBroadcaster(self)
 
     
     def preprocess_map(self, map_msg):
@@ -349,11 +386,38 @@ class PathGenerator(Node):
 
     def initial_pose_callback(self, pose_msg):
         self.initial_pose = pose_msg.pose
+        self.init_pose_msg = pose_msg
         goal_point_x = self.get_parameter('goal_point_x').get_parameter_value().double_value
         goal_point_y = self.get_parameter('goal_point_x').get_parameter_value().double_value
         self.goal_pose = Pose(position=Point(x=float(goal_point_x), y=float(goal_point_y), z=1.), orientation=Quaternion(x=0., y=0., z=0., w=0.))
         self.get_logger().debug(f"Initial Pose: {pose_msg.pose}")
+
+        
+
         self.plan()
+
+    def publish_transform(self):
+        t = TransformStamped()
+
+        # Read message content and assign it to
+        # corresponding tf variables
+        t.header.stamp = self.get_clock().now().to_msg()
+        t.header.frame_id = 'map'
+        t.child_frame_id = 'odom'
+
+        # Turtle only exists in 2D, thus we get x and y translation
+        # coordinates from the message and set the z coordinate to 0
+        t.transform.translation.x = self.init_pose_msg.pose.pose.position.x
+        t.transform.translation.y = self.init_pose_msg.pose.pose.position.y
+        t.transform.translation.z = 0.0
+
+        # For the same reason, turtle can only rotate around one axis
+        # and this why we set rotation in x and y to 0 and obtain
+        # rotation in z axis from the message
+        t.transform.rotation = self.init_pose_msg.pose.pose.orientation
+
+        # Send the transformation
+        self.tf_broadcaster.sendTransform(t)
 
     def goal_pose_callback(self, pose_msg):
         self.goal_pose = pose_msg.pose
@@ -436,6 +500,7 @@ def main():
     map_matrix = read_pgm("/home/parallels/projects/mobile_robotics/ws02/src/mr_goto/maps/cave.pgm").copy()
     normalized = map_matrix * 100. / np.max(map_matrix)
     map_matrix = normalized.astype(float)
+    map_matrix = np.flip(map_matrix, axis=0)
     with open("/home/parallels/projects/mobile_robotics/ws02/src/mr_goto/maps/cave.yaml") as f:
         map_yaml = yaml.load(f, Loader=SafeLoader)
         map = OccupancyGrid()
