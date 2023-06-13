@@ -1,4 +1,4 @@
-image: cave.png
+image: cave.pgm
 resolution: 0.02
 origin: [-5, -5, 0]
 negate: 0

@@ -1,24 +1,51 @@
 #!/usr/bin/env python3
 import sys
+import re
 import numpy as np
 import skimage
 import time
 from collections import defaultdict
 import heapq as heap
 from functools import wraps
+import yaml
+from yaml.loader import SafeLoader
 
 from mr_goto.bspline import approximate_b_spline_path
 
 import rclpy
+from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy, QoSDurabilityPolicy
 from rclpy.node import Node
 from rclpy.duration import Duration
 
 from sensor_msgs.msg import LaserScan
+from std_msgs.msg import Header
 from ackermann_msgs.msg import AckermannDriveStamped
-from nav_msgs.msg import Odometry, OccupancyGrid, Path
-from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped
+from nav_msgs.msg import Odometry, OccupancyGrid, Path, MapMetaData
+from geometry_msgs.msg import Pose, PoseStamped, PoseWithCovarianceStamped, Point, Quaternion
 from visualization_msgs.msg import Marker
 
+
+def read_pgm(filename, byteorder='>'):
+    """Return image data from a raw PGM file as numpy array.
+
+    Format specification: http://netpbm.sourceforge.net/doc/pgm.html
+
+    """
+    with open(filename, 'rb') as f:
+        buffer = f.read()
+    try:
+        header, width, height, maxval = re.search(
+            b"(^P5\s(?:\s*#.*[\r\n])*"
+            b"(\d+)\s(?:\s*#.*[\r\n])*"
+            b"(\d+)\s(?:\s*#.*[\r\n])*"
+            b"(\d+)\s(?:\s*#.*[\r\n]\s)*)", buffer).groups()
+    except AttributeError:
+        raise ValueError("Not a raw PGM file: '%s'" % filename)
+    return np.frombuffer(buffer,
+                            dtype='u1' if int(maxval) < 256 else byteorder+'u2',
+                            count=int(width)*int(height),
+                            offset=len(header)
+                            ).reshape((int(height), int(width)))
 
 
 def timing(f):
@@ -42,24 +69,40 @@ class PathGenerator(Node):
         self.get_logger().info("HEY from planner")
 
         # Subscribers
-        self.map_sub = self.create_subscription(OccupancyGrid, "/map", self.map_callback, 1)
-        self.initial_pose_sub = self.create_subscription(PoseWithCovarianceStamped, "/initialpose", self.initial_pose_callback, 1)
-        self.goal_pose_sub = self.create_subscription(PoseStamped, "/goal_pose", self.goal_pose_callback, 1)
+        self.map_sub = self.create_subscription(OccupancyGrid, "map", self.map_callback, 1)
+        self.initial_pose_sub = self.create_subscription(PoseWithCovarianceStamped, "initialpose", self.initial_pose_callback, 1)
+        self.ground_truth_sub = self.create_subscription(Odometry, "ground_truth", self.ground_truth_callback, 1)
+        self.goal_pose_sub = self.create_subscription(PoseStamped, "goal_pose", self.goal_pose_callback, 1)
 
         # Publishers
 
         self.drive_pub = self.create_publisher(AckermannDriveStamped, "/nav", 1000)
+        self.map_pub = self.create_publisher(OccupancyGrid, "/map", qos_profile=QoSProfile(
+            reliability=QoSReliabilityPolicy.RELIABLE,
+            history=QoSHistoryPolicy.KEEP_LAST,
+            durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
+            depth=1
+        ))
         self.marker_pub = self.create_publisher( Marker, "/visualization_marker", 1000)
         self.path_pub = self.create_publisher( Path, '/path', 1)
         self.path2_pub = self.create_publisher(Path, '/path2', 1)
-
+        self.map_pub_timer = self.create_timer(1.0, self.publish_map)
+        self.map_seq_id = 0
 
         # Controller parameters
         self.sparsity = 5 
         self.scale = 1 # by which factor to downscale the map resolution before performing the path generation
-        self.safety_margin = 0.4 # in meters
+        self.safety_margin = 0.2 # in meters
         self.occupancy_treshhold = 10 # pixel below this treshold (in percent) we consider free space
-    
+
+        self.declare_parameter('goal_point_x', 3.)
+        self.declare_parameter('goal_point_y', 3.)
+        # self.parameter_timer = self.create_timer(1, self.param_timer_callback)
+
+        self.initial_pose = None
+        self.goal_pose = rclpy
+        self.map = OccupancyGrid()
+        self.map_matrix = np.matrix([[]])
 
     
     def preprocess_map(self, map_msg):
@@ -82,16 +125,19 @@ class PathGenerator(Node):
         map_data[map_data == - 1] = 100
         map_binary = (map_data < self.occupancy_treshhold).astype(int)
 
-        # TODO: Maybe replace hardcoded initial position? /gt_pose?
-        self.starting_point = self.convert_position_to_grid_cell(0, 0)
 
         return map_binary
     
+    def publish_map(self):
+        self.map.header.stamp = self.get_clock().now().to_msg()
+        self.map.header.frame_id = 'map'
+        self.map_pub.publish(self.map)
+
     def calculate_finish_line(self, driveable_area):
         # TODO: Currently, we assume the car is always facing straight forward at the start
         # Maybe adjust to calculate the finish line perpendicular to the inital orientation of the car?
-        x = self.starting_point[0]
-        y = self.starting_point[1]
+        x = self.goal_point[0]
+        y = self.goal_point[1]
         left_end = y
         right_end = y
 
@@ -130,7 +176,8 @@ class PathGenerator(Node):
         # Currently expects the finishline to always be horizontal
         # TODO: Make this into proper Dijkstra with an 8-neighborhood with diagonal weights of sqrt(2)
         x = finish_line_start[0]
-        finish_line = [(x,y) for y in range(finish_line_start[1], finish_line_end[1] + 1)]
+        # finish_line = [(x,y) for y in range(finish_line_start[1], finish_line_end[1] + 1)]
+        finish_line = [self.goal_point]
 
         visited = np.array(safe_area)
         visited.fill(False)
@@ -176,26 +223,29 @@ class PathGenerator(Node):
                         heap.heappush(priority_queue, (new_costs, (new_x,new_y)))
             else:
                 for delta_x, delta_y, weight in neighborhood:
-                    new_x = x + delta_x
-                    new_y = y + delta_y 
+                    try:
+                        new_x = x + delta_x
+                        new_y = y + delta_y 
 
-                    # The loop is only completed if the start point is reached from above
-                    if (new_x,new_y) == self.starting_point and new_x == x - 1:
-                        new_costs = nodeCosts[(x,y)] + weight
-                        if new_costs < nodeCosts[(new_x,new_y)]:
-                            previous_node[(new_x,new_y)] = (x,y)
-                            nodeCosts[(new_x,new_y)] = new_costs
-                            heap.heappush(priority_queue, (new_costs, (new_x,new_y)))
+                        # The loop is only completed if the start point is reached from above
+                        if (new_x,new_y) == self.starting_point and new_x == x - 1:
+                            new_costs = nodeCosts[(x,y)] + weight
+                            if new_costs < nodeCosts[(new_x,new_y)]:
+                                previous_node[(new_x,new_y)] = (x,y)
+                                nodeCosts[(new_x,new_y)] = new_costs
+                                heap.heappush(priority_queue, (new_costs, (new_x,new_y)))
 
-                    if visited[new_x, new_y]:
+                        if visited[new_x, new_y]:
+                            continue
+
+                        if safe_area[new_x, new_y] == 1:
+                            new_costs = nodeCosts[(x,y)] + weight
+                            if new_costs < nodeCosts[(new_x,new_y)]:
+                                previous_node[(new_x,new_y)] = (x,y)
+                                nodeCosts[(new_x,new_y)] = new_costs
+                                heap.heappush(priority_queue, (new_costs, (new_x,new_y)))
+                    except:
                         continue
-
-                    if safe_area[new_x, new_y] == 1:
-                        new_costs = nodeCosts[(x,y)] + weight
-                        if new_costs < nodeCosts[(new_x,new_y)]:
-                            previous_node[(new_x,new_y)] = (x,y)
-                            nodeCosts[(new_x,new_y)] = new_costs
-                            heap.heappush(priority_queue, (new_costs, (new_x,new_y)))
     
     @timing
     def shortest_path(self, map_msg, safe_area, finish_line_start, finish_line_end, neighborhood):
@@ -293,26 +343,40 @@ class PathGenerator(Node):
                     stack.append((x - 1, y))
         
         return map_binary == 2
+    
+    def ground_truth_callback(self, data):
+        self.initial_pose = data.pose.pose
 
     def initial_pose_callback(self, pose_msg):
         self.initial_pose = pose_msg.pose
+        goal_point_x = self.get_parameter('goal_point_x').get_parameter_value().double_value
+        goal_point_y = self.get_parameter('goal_point_x').get_parameter_value().double_value
+        self.goal_pose = Pose(position=Point(x=float(goal_point_x), y=float(goal_point_y), z=1.), orientation=Quaternion(x=0., y=0., z=0., w=0.))
         self.get_logger().debug(f"Initial Pose: {pose_msg.pose}")
+        self.plan()
 
     def goal_pose_callback(self, pose_msg):
         self.goal_pose = pose_msg.pose
         self.get_logger().debug(f"Goal Pose: {pose_msg.pose}")
+        if self.initial_pose is not None:
+            self.plan()
 
-    def map_callback(self, map_msg):
-        self.get_logger().info(f"Map Header: {map_msg.header}")
-        self.get_logger().info(f"Map info: {map_msg.info}")
-
-        map_binary = self.preprocess_map(map_msg)
+    def plan(self):
+        if self.initial_pose is None or self.goal_pose is None:
+            self.get_logger().info("something is not right")
+            return
+        
+        map_binary = self.preprocess_map(self.map)
         self.get_logger().info(f"number of free grid cells: {np.sum(map_binary)}")
 
+        self.starting_point = self.convert_position_to_grid_cell(self.initial_pose.pose.position.x, self.initial_pose.pose.position.y)
+        self.goal_point = self.convert_position_to_grid_cell(self.goal_pose.position.x, self.goal_pose.position.y)
         driveable_area = self.fill4(map_binary, self.starting_point[0], self.starting_point[1])
         self.get_logger().info(f"number of driveable grid cells: {np.sum(driveable_area)}")
 
-        finish_line_start, finish_line_end = self.calculate_finish_line(driveable_area)    
+        # finish_line_start, finish_line_end = self.calculate_finish_line(driveable_area)    
+        finish_line_start = self.goal_point
+        finish_line_end = self.goal_point
         safe_area = self.erode_map(driveable_area)
         self.get_logger().info(f"number of safe grid cells: {np.sum(safe_area)}")
 
@@ -321,20 +385,27 @@ class PathGenerator(Node):
         neighborhood4 = [(0,1,1), (0,-1,1), (1,0,1), (-1,0,1)]
         neighborhood8 = [(0,1,1), (0,-1,1), (1,0,1), (-1,0,1), (1,1,np.sqrt(2)), (1,-1,np.sqrt(2)), (-1,1, np.sqrt(2)), (-1,1, np.sqrt(2))]
 
-        shortest_path, distance = self.shortest_path(map_msg, safe_area, finish_line_start, finish_line_end, neighborhood4)
+        shortest_path, distance = self.shortest_path(self.map, safe_area, finish_line_start, finish_line_end, neighborhood4)
         self.get_logger().info(f"Length of shortest path: {self.map_res * distance} meters")
 
-        shortest_path, distance = self.shortest_path(map_msg, safe_area, finish_line_start, finish_line_end, neighborhood8)
+        shortest_path, distance = self.shortest_path(self.map, safe_area, finish_line_start, finish_line_end, neighborhood8)
         self.get_logger().info(f"Length of shortest path (with diagonals): {self.map_res * distance} meters")
 
-        optimized_path, distance = self.optimize_raceline(map_msg, shortest_path)
+        optimized_path, distance = self.optimize_raceline(self.map, shortest_path)
         self.get_logger().info(f"Length of optimized path (with diagonals): {distance} meters")
 
-        shortest_path.header = map_msg.header
+        shortest_path.header = self.map.header
         self.path_pub.publish(shortest_path)
 
-        optimized_path.header = map_msg.header
+        optimized_path.header = self.map.header
         self.path2_pub.publish(optimized_path)
+
+
+    def map_callback(self, map_msg):
+        # self.get_logger().info(f"Map Header: {map_msg.header}")
+        # self.get_logger().info(f"Map info: {map_msg.info}")
+
+        self.map = map_msg
 
     def visualize_point(self,x,y,frame='map',r=0.0,g=1.0,b=0.0):
         marker = Marker()
@@ -362,10 +433,42 @@ class PathGenerator(Node):
 def main():
     rclpy.init()
     follow_the_gap = PathGenerator()
-    # rclpy.sleep(0.1)
-    rclpy.spin(follow_the_gap)
-    follow_the_gap.destroy_node()
-    rclpy.shutdown()
+    map_matrix = read_pgm("/home/parallels/projects/mobile_robotics/ws02/src/mr_goto/maps/cave.pgm").copy()
+    normalized = map_matrix * 100. / np.max(map_matrix)
+    map_matrix = normalized.astype(float)
+    with open("/home/parallels/projects/mobile_robotics/ws02/src/mr_goto/maps/cave.yaml") as f:
+        map_yaml = yaml.load(f, Loader=SafeLoader)
+        map = OccupancyGrid()
+        origin = map_yaml['origin']
+        origin_point = Point()
+        origin_point.x = float(origin[0])
+        origin_point.y = float(origin[1])
+        origin_point.z = float(origin[2])
+        origin_pose = Pose()
+        origin_pose.position = origin_point
+        origin_pose.orientation = Quaternion()
+        map.info = MapMetaData()
+        map.info.map_load_time = follow_the_gap.get_clock().now().to_msg()
+        map.info.width = map_matrix.shape[0]
+        map.info.height = map_matrix.shape[1]
+        map.info.origin = origin_pose
+        map.info.resolution = map_yaml['resolution']
+        data = map_matrix.astype(int).flatten()
+        free_thres = map_yaml['free_thresh']
+        occupied_thres = map_yaml['occupied_thresh']
+        # data[data > 1. - free_thres] = 0
+        # data[data < 1. - occupied_thres] = 100
+        data[data < free_thres] = 0
+        data[data > occupied_thres] = 100
+        data_copy = data.copy()
+        data[data == 100] = 0
+        data[data_copy == 0] = 100
+        map.data = data.tolist()
+        follow_the_gap.map = map
+        follow_the_gap.map_matrix = map_matrix
+        rclpy.spin(follow_the_gap)
+        follow_the_gap.destroy_node()
+        rclpy.shutdown()
 
 if __name__=='__main__':
 	main()

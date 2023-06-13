@@ -11,7 +11,7 @@ import tf2_ros
 import tf2_geometry_msgs
 from sensor_msgs.msg import LaserScan
 from ackermann_msgs.msg import AckermannDriveStamped, AckermannDrive
-from geometry_msgs.msg import Point, Pose, PoseStamped
+from geometry_msgs.msg import Point, Pose, PoseStamped, Twist
 from visualization_msgs.msg import Marker
 from visualization_msgs.msg import MarkerArray
 from nav_msgs.msg import OccupancyGrid
@@ -36,7 +36,7 @@ class pure_pursuit(Node):
         self.get_logger().info("HEY from goto")
         #Topics & Subscriptions,Publishers
         lidarscan_topic = '/scan'
-        drive_topic = '/pure_pursuit_nav'
+        drive_topic = '/cmd_vel'
         map_topic = '/map'
         odom_topic = '/odom'
         path_topic = '/path2'
@@ -78,7 +78,7 @@ class pure_pursuit(Node):
         self.odom_sub = self.create_subscription(Odometry, odom_topic, self.odom_callback, 1)
         self.lidar_sub = self.create_subscription(LaserScan, lidarscan_topic, self.lidar_callback, 1)
 
-        self.drive_pub = self.create_publisher(AckermannDriveStamped, drive_topic, 1)
+        self.drive_pub = self.create_publisher(Twist, drive_topic, 10)
         self.marker_pub = self.create_publisher(Marker, "/marker_goal", 1000)
         self.actual_path_pub = self.create_publisher(Path, "/actual_path", 1)
 
@@ -140,7 +140,6 @@ class pure_pursuit(Node):
 
         # find closest path point to current pose
         ground_pose = (self.ground_pose.position.x, self.ground_pose.position.y)
-        self.append_pose(ground_pose[0], ground_pose[1])
 
         if self.prev_ground_path_index is None:
             dists = np.linalg.norm(poses - ground_pose, axis=1)
@@ -184,7 +183,7 @@ class pure_pursuit(Node):
 
 
         # transform goal point to vehicle coordinate frame
-        transform = self.tf_buffer.lookup_transform("base_link", self.path.header.frame_id, self.get_clock().now())
+        transform = self.tf_buffer.lookup_transform("base_link", self.path.header.frame_id, self.path.header.stamp)
         goal_transformed = tf2_geometry_msgs.do_transform_point(PointWrapper(Point(goal[0], goal[1], 1)), transform).point
 
         self.goal_pose = goal_transformed
@@ -213,14 +212,12 @@ class pure_pursuit(Node):
     
     def path_callback(self, data):
         self.path = data
-     
+        self.get_logger().info(f"Received path: {self.path}")
 
     def publish_drive(self, speed, angle):
-        drive_msg = AckermannDriveStamped()
-        drive_msg.header.stamp = self.get_clock().now()
-        # drive_msg.header.frame_id = "laser"
-        drive_msg.drive.steering_angle = angle
-        drive_msg.drive.speed = speed
+        drive_msg = Twist()
+        drive_msg.linear.x = speed
+        drive_msg.angular.z = angle
         self.drive_pub.publish(drive_msg)
 
     def visualize_point(self,x,y,frame='map',r=0.0,g=1.0,b=0.0):
