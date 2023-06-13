@@ -1,0 +1,4 @@
+<?xml version="1.0"?>
+<launch>
+  <node name="planner" pkg="mr_goto" exec="planner" output = "screen"/>
+</launch>

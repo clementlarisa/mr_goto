@@ -1,0 +1,8 @@
+goto:
+  ros__parameters:
+    map_path: /home/parallels/projects/mobile_robotics/ws02/src/mr_ekf/config/maps/cave.png
+
+ekf:
+  ros__parameters:
+    map_file: /home/parallels/projects/mobile_robotics/ws02/src/mr_ekf/config/maps/cave.png
+    map_linesegments_file: /home/parallels/projects/mobile_robotics/ws02/src/mr_ekf/config/maps/cave.yml
