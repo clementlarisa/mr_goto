@@ -16,6 +16,9 @@ ros2 launch launch/goto.launch.py params_file:=params.yaml localization:=pf
 
 **Total points achieved:**
 
+<img width="1728" alt="Screenshot 2023-06-13 at 23 46 32" src="https://github.com/clementlarisa/mr_goto/assets/36739302/0ee7dd2e-cd3b-4eda-98ec-95af304c56a0">
+<img width="1728" alt="Screenshot 2023-06-13 at 23 46 29" src="https://github.com/clementlarisa/mr_goto/assets/36739302/6a28b424-c046-4376-beca-aa9f5dff2dc1">
+
 ### 1. GoTo
 
 - Your planner is using your self-localization (20 Points). This means listening to the `/estimated_pose` topic  <br>If you like to skip this point, you can use the **/ground_truth** data/msg in your planner.
@@ -24,6 +27,7 @@ ros2 launch launch/goto.launch.py params_file:=params.yaml localization:=pf
 #### 1.1 New Node
 
 - implemented the planner in a newly created node (50 Points)
+
 
 #### 1.2 Simple, no Obstacle
 
