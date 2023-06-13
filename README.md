@@ -14,7 +14,7 @@ ros2 launch launch/goto.launch.py params_file:=params.yaml localization:=pf
 
 ## Tasks
 
-**Total points achieved:**
+**Total points achieved: 410**
 
 <img width="1728" alt="Screenshot 2023-06-13 at 23 46 32" src="https://github.com/clementlarisa/mr_goto/assets/36739302/0ee7dd2e-cd3b-4eda-98ec-95af304c56a0">
 <img width="1728" alt="Screenshot 2023-06-13 at 23 46 29" src="https://github.com/clementlarisa/mr_goto/assets/36739302/6a28b424-c046-4376-beca-aa9f5dff2dc1">
